@@ -6,6 +6,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from env_loader import load_local_env
+
+load_local_env()
+
 
 def database_path() -> Path:
     path = Path(os.getenv("WA_DB_PATH", "data/wa-system.db"))

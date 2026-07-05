@@ -1,67 +1,183 @@
 # WA BOT SISTEM
 
-Repositori khusus untuk layanan Python berbasis webhook resmi WhatsApp Cloud API. Sistem sebelumnya telah dipindahkan dari proyek `landing-page` ke repositori ini.
+Repositori khusus untuk layanan Python berbasis webhook resmi WhatsApp Cloud API.
 
-## Ruang lingkup
+## Batas sistem
 
-Sistem ini ditujukan untuk percakapan bisnis yang sah dengan kontak yang sudah memberikan persetujuan. Sistem tidak menyediakan broadcast massal, percakapan palsu, pemeriksaan status online pengguna, atau pengiriman proaktif ke daftar nomor.
+Sistem hanya menggunakan data webhook, delivery receipt, database lokal, dan metadata nomor bisnis yang dikonfigurasi. Sistem tidak dapat menentukan apakah nomor pengguna sedang online, memindai nomor acak, menjamin nomor tidak diblokir, atau menghindari pembatasan platform.
+
+Status kontak pada CMD berarti:
+
+- `opted_in`: persetujuan tersimpan di database
+- `has_incoming_messages`: pernah ada pesan masuk yang diterima webhook
+- `sent`, `delivered`, `read`, `failed`: status pesan dari webhook
+- `api_reachable`: credential dan resource nomor bisnis yang dikonfigurasi dapat diakses
 
 ## Fitur
 
-- menerima webhook pesan masuk
-- validasi signature `X-Hub-Signature-256`
-- hanya membalas nomor opt-in/test yang diizinkan
-- registry kontak manual dengan sumber dan waktu persetujuan
-- pencatatan opt-out
-- data respons disimpan terpisah dalam `response_data.json`
-- deduplikasi berdasarkan ID pesan masuk
-- debounce/cooldown per nomor antara 16–20 detik
-- pesan baru dari nomor yang sama menggantikan balasan yang masih menunggu
-- penyimpanan pesan dan status ke SQLite
-- status resmi `accepted`, `sent`, `delivered`, `read`, dan `failed`
-- endpoint log dilindungi `WA_ADMIN_API_KEY`
-- struktur counter untuk batas balasan harian per kontak
+- webhook pesan masuk dan validasi signature
+- cooldown/debounce per penerima 16–20 detik
+- pesan baru menggantikan balasan yang masih menunggu
+- allowlist nomor opt-in/test
+- respons otomatis dari `response_data.json`
+- deduplikasi ID pesan
+- SQLite untuk kontak, pesan, dan status delivery
+- input kontak opt-in dari CMD
+- laporan aktivitas database per kontak
+- ringkasan dan pencarian status pesan
+- pemeriksaan metadata nomor bisnis yang dikonfigurasi
+- Docker, unit test, dan GitHub Actions
 
-Cooldown digunakan untuk mencegah burst dan balasan bertumpuk. Balasan default diberi label sebagai balasan otomatis.
+## Instalasi Windows CMD
 
-## Kontak manual
+Clone atau download repo, buka CMD pada folder repo, lalu jalankan:
 
-Nomor manual hanya boleh dimasukkan setelah ada bukti persetujuan. Registry menyimpan nomor internasional, status opt-in, sumber persetujuan, catatan, waktu persetujuan, dan waktu opt-out.
-
-Menambahkan kontak ke database tidak mengirim pesan secara otomatis. Pengiriman tetap hanya boleh terjadi sebagai respons terhadap pesan masuk yang sah.
-
-## Menjalankan lokal
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-uvicorn app:app --host 0.0.0.0 --port 8000
+```bat
+setup.cmd
 ```
 
-Pada Windows PowerShell:
+Perintah tersebut membuat `.venv`, memasang dependency, membuat `.env`, menginisialisasi database, mengompilasi Python, dan menjalankan test.
 
-```powershell
-.venv\Scripts\Activate.ps1
+Edit `.env` dan isi credential resmi:
+
+```env
+WA_GRAPH_API_VERSION=
+WA_PHONE_NUMBER_ID=
+WA_ACCESS_TOKEN=
+WA_APP_SECRET=
+WA_VERIFY_TOKEN=
+WA_ADMIN_API_KEY=
+WA_ALLOWED_RECIPIENTS=60123456789
 ```
+
+Jalankan server:
+
+```bat
+start.cmd
+```
+
+Server tersedia pada port `8000`.
+
+## Input nomor manual
+
+Nomor wajib memakai kode negara tanpa tanda `+`, spasi, atau tanda hubung.
+
+Tambahkan kontak yang sudah memberikan opt-in:
+
+```bat
+.venv\Scripts\python admin_contacts.py add --phone 60123456789 --source "website-form" --note "Consent recorded"
+```
+
+Lihat kontak dan aktivitas pesan yang tersimpan:
+
+```bat
+.venv\Scripts\python admin_contacts.py show --phone 60123456789
+```
+
+Hasil menampilkan jumlah pesan masuk/keluar, pesan terakhir, dan `has_incoming_messages`. Nilai ini berasal dari database lokal, bukan status online WhatsApp.
+
+Daftar kontak:
+
+```bat
+.venv\Scripts\python admin_contacts.py list --limit 100
+```
+
+Catat opt-out:
+
+```bat
+.venv\Scripts\python admin_contacts.py opt-out --phone 60123456789
+```
+
+## Status pesan
+
+Ringkasan seluruh status:
+
+```bat
+.venv\Scripts\python admin_messages.py summary
+```
+
+Daftar pesan terbaru:
+
+```bat
+.venv\Scripts\python admin_messages.py list --limit 100
+```
+
+Cari satu pesan berdasarkan ID:
+
+```bat
+.venv\Scripts\python admin_messages.py show --message-id wamid.EXAMPLE
+```
+
+Status yang disimpan meliputi `received`, `accepted`, `sent`, `delivered`, `read`, dan `failed`. Untuk status `failed`, periksa field `error`.
+
+## Pemeriksaan nomor bisnis
+
+Jalankan:
+
+```bat
+.venv\Scripts\python business_check.py
+```
+
+Perintah ini memeriksa resource `WA_PHONE_NUMBER_ID` milik bisnis Anda dan menampilkan:
+
+- konfigurasi credential tersedia atau tidak
+- API dapat dijangkau atau tidak
+- HTTP error bila akses ditolak
+- metadata seperti display number, verified name, dan quality rating bila tersedia
+
+Perintah ini tidak memeriksa status aktif/online nomor penerima dan tidak dapat memastikan alasan pembatasan akun di luar respons API.
+
+## Data respons otomatis
+
+Respons berada di:
+
+```text
+response_data.json
+```
+
+Lihat semua rule:
+
+```bat
+.venv\Scripts\python admin_responses.py --list
+```
+
+Preview respons untuk contoh pesan masuk:
+
+```bat
+.venv\Scripts\python admin_responses.py --message "halo"
+```
+
+Format data:
+
+```json
+{
+  "default": "Balasan otomatis: Terima kasih, pesan Anda sudah diterima.",
+  "rules": [
+    {
+      "keywords": ["halo", "hai"],
+      "response": "Balasan otomatis: Halo, terima kasih sudah menghubungi kami."
+    }
+  ]
+}
+```
+
+Pesan yang tidak cocok dengan rule menggunakan `default`.
 
 ## Endpoint
 
 - `GET /health` — kesehatan layanan dan ringkasan status
-- `GET /webhook` — verifikasi webhook Meta
-- `POST /webhook` — menerima pesan dan status delivery
-- `GET /messages?limit=100` — log pesan; wajib header `X-Admin-Key`
+- `GET /webhook` — verifikasi webhook
+- `POST /webhook` — menerima pesan dan delivery update
+- `GET /messages?limit=100` — log pesan dengan header `X-Admin-Key`
 
 ## Cooldown
 
 ```env
 WA_COOLDOWN_MIN_SECONDS=16
 WA_COOLDOWN_MAX_SECONDS=20
-WA_MAX_REPLIES_PER_CONTACT_PER_DAY=6
 ```
 
-Untuk satu nomor, hanya satu balasan tertunda yang disimpan. Ketika pesan baru masuk sebelum timer selesai, balasan lama dibatalkan dan diganti dengan balasan terbaru.
+Cooldown mencegah beberapa balasan terkirim bersamaan. Ini bukan alat untuk menyamarkan otomatisasi sebagai manusia.
 
 ## Docker
 
@@ -72,10 +188,11 @@ docker run --env-file .env -p 8000:8000 wa-bot-system
 
 ## Pengujian
 
-```bash
-python -m pytest -q
+```bat
+.venv\Scripts\python -m compileall -q .
+.venv\Scripts\python -m pytest -q
 ```
 
 ## Keamanan
 
-Jangan commit `WA_ACCESS_TOKEN`, `WA_APP_SECRET`, `WA_VERIFY_TOKEN`, atau `WA_ADMIN_API_KEY`. Gunakan nomor yang memiliki izin/opt-in dan patuhi kebijakan WhatsApp Business Platform.
+Jangan commit `.env`, token, app secret, verify token, atau admin key. Gunakan nomor yang telah memberikan izin dan patuhi kebijakan WhatsApp Business Platform.
