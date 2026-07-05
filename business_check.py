@@ -7,6 +7,10 @@ from typing import Any
 
 import httpx
 
+from env_loader import load_local_env
+
+load_local_env()
+
 from wa_client import required_env
 
 
