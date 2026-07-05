@@ -12,6 +12,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
+from contact_store import init_contact_store, is_opted_in
 from cooldown import ReplyCooldown
 from response_config import select_response
 from status_parser import extract_delivery_statuses
@@ -41,13 +42,14 @@ cooldown = ReplyCooldown(
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_database()
+    init_contact_store()
     yield
     await cooldown.shutdown()
 
 
 app = FastAPI(
     title="WA Auto Reply Service",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -141,7 +143,7 @@ async def health() -> dict[str, Any]:
             "minimum": cooldown.minimum_seconds,
             "maximum": cooldown.maximum_seconds,
         },
-        "allowed_recipient_count": len(allowed_recipients()),
+        "bootstrap_allowlist_count": len(allowed_recipients()),
         "message_summary": status_summary(),
     }
 
@@ -182,7 +184,7 @@ async def webhook(request: Request) -> dict[str, int | str]:
         )
         status_count += 1
 
-    permitted = allowed_recipients()
+    bootstrap = allowed_recipients()
     for incoming in extract_incoming_texts(payload):
         incoming_count += 1
         if message_exists(incoming["message_id"]):
@@ -199,8 +201,9 @@ async def webhook(request: Request) -> dict[str, int | str]:
             raw=incoming["raw"],
         )
 
-        if incoming["sender"] not in permitted:
-            logger.info("Incoming number is not in WA_ALLOWED_RECIPIENTS")
+        permitted = incoming["sender"] in bootstrap or is_opted_in(incoming["sender"])
+        if not permitted:
+            logger.info("Incoming number has no stored opt-in")
             continue
 
         response = reply_text(incoming["body"])
