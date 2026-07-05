@@ -4,6 +4,10 @@ import argparse
 import json
 from typing import Any
 
+from env_loader import load_local_env
+
+load_local_env()
+
 from storage import init_database, list_messages, status_summary
 
 
