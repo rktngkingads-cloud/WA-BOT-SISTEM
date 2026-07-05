@@ -11,11 +11,32 @@ from contact_store import (
     set_opt_in,
     set_opt_out,
 )
+from storage import init_database, list_messages
 from wa_client import normalize_phone
 
 
 def output(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def contact_report(phone: str) -> dict[str, Any]:
+    contact = get_contact(phone)
+    rows = [item for item in list_messages(500) if item.get("phone") == phone]
+    incoming = [item for item in rows if item.get("direction") == "incoming"]
+    outgoing = [item for item in rows if item.get("direction") == "outgoing"]
+    return {
+        "found": contact is not None,
+        "contact": contact,
+        "database_activity": {
+            "has_incoming_messages": bool(incoming),
+            "incoming_count": len(incoming),
+            "outgoing_count": len(outgoing),
+            "last_incoming": incoming[0] if incoming else None,
+            "last_outgoing": outgoing[0] if outgoing else None,
+            "latest_message": rows[0] if rows else None,
+        },
+        "activity_source": "local webhook and delivery database",
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     remove = commands.add_parser("opt-out", help="Record an opt-out")
     remove.add_argument("--phone", required=True)
 
-    show = commands.add_parser("show", help="Show one contact")
+    show = commands.add_parser("show", help="Show one contact and stored activity")
     show.add_argument("--phone", required=True)
 
     listing = commands.add_parser("list", help="List contacts")
@@ -45,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     init_contact_store()
+    init_database()
 
     if args.command == "init":
         output({"initialized": True})
@@ -69,7 +91,7 @@ def main() -> int:
 
     if args.command == "show":
         phone = normalize_phone(args.phone)
-        output(get_contact(phone) or {"found": False, "phone": phone})
+        output(contact_report(phone))
         return 0
 
     output({"items": list_contacts(args.limit)})
