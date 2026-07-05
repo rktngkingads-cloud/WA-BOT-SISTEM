@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 from typing import Any
 
@@ -60,3 +62,13 @@ async def safe_resource_check() -> dict[str, Any]:
         }
 
     return {"configured": True, **result}
+
+
+def main() -> int:
+    result = asyncio.run(safe_resource_check())
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0 if result.get("api_reachable") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
