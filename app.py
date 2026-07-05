@@ -13,6 +13,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
 from cooldown import ReplyCooldown
+from response_config import select_response
 from status_parser import extract_delivery_statuses
 from storage import init_database, list_messages, message_exists, save_message, status_summary
 from wa_client import allowed_recipients, normalize_phone, required_env, send_allowed_reply
@@ -46,7 +47,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="WA Auto Reply Service",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -99,23 +100,8 @@ def extract_incoming_texts(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def reply_text(incoming_text: str) -> str:
-    rules_raw = os.getenv("WA_AUTO_REPLY_RULES", "").strip()
-    if rules_raw:
-        try:
-            rules = json.loads(rules_raw)
-        except json.JSONDecodeError:
-            logger.exception("WA_AUTO_REPLY_RULES is invalid JSON")
-        else:
-            if isinstance(rules, dict):
-                normalized = incoming_text.casefold()
-                for keyword, response in rules.items():
-                    if str(keyword).casefold() in normalized and str(response).strip():
-                        return str(response).strip()
-
-    return os.getenv(
-        "WA_AUTO_REPLY_TEXT",
-        "Balasan otomatis: Terima kasih, pesan Anda sudah diterima.",
-    ).strip()
+    _, response = select_response(incoming_text)
+    return response
 
 
 async def send_and_record(recipient: str, message: str) -> None:
