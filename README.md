@@ -1,6 +1,6 @@
 # WA BOT SISTEM
 
-Layanan Python terpisah untuk webhook resmi WhatsApp Cloud API.
+Repositori khusus untuk layanan Python berbasis webhook resmi WhatsApp Cloud API. Sistem sebelumnya telah dipindahkan dari proyek `landing-page` ke repositori ini.
 
 ## Ruang lingkup
 
