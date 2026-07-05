@@ -37,6 +37,10 @@ def select_response(message: str) -> tuple[str, str]:
     return "default", str(data.get("default", "")).strip()
 
 
+def named_response(name: str, fallback: str = "") -> str:
+    return str(load_responses().get(name, fallback)).strip()
+
+
 def list_response_rules() -> list[dict[str, Any]]:
     data = load_responses()
     rules = data.get("rules", [])
