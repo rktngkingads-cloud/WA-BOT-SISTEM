@@ -1,0 +1,17 @@
+name: Compact diagnostics
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  compact-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install
+        run: python3 -m pip install -q -r requirements.txt
+      - name: First failure
+        run: python3 -m pytest -q -x --tb=line
