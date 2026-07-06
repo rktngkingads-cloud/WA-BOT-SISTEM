@@ -15,8 +15,9 @@ def database_path() -> Path:
 
 
 def connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(database_path())
+    connection = sqlite3.connect(database_path(), timeout=5.0)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout = 5000")
     return connection
 
 

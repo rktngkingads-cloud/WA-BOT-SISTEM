@@ -14,9 +14,15 @@ def database_path() -> Path:
 
 
 def connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(database_path())
+    connection = sqlite3.connect(database_path(), timeout=5.0)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout = 5000")
     return connection
+
+
+def _column_names(connection: sqlite3.Connection, table: str) -> set[str]:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return {str(row["name"]) for row in rows}
 
 
 def init_contact_store() -> None:
@@ -25,6 +31,7 @@ def init_contact_store() -> None:
             """
             CREATE TABLE IF NOT EXISTS contacts (
                 phone TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL DEFAULT '',
                 opted_in INTEGER NOT NULL DEFAULT 0,
                 consent_source TEXT,
                 consent_note TEXT,
@@ -44,6 +51,12 @@ def init_contact_store() -> None:
             """
         )
 
+        # Safe migration for databases created by the previous release.
+        if "display_name" not in _column_names(connection, "contacts"):
+            connection.execute(
+                "ALTER TABLE contacts ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"
+            )
+
 
 def set_opt_in(
     phone: str,
@@ -51,17 +64,23 @@ def set_opt_in(
     source: str,
     note: str = "",
     consent_at: int | None = None,
+    display_name: str = "",
 ) -> None:
     now = int(time.time())
     consent_time = consent_at or now
+    name = str(display_name).strip()
     with connect() as connection:
         connection.execute(
             """
             INSERT INTO contacts (
-                phone, opted_in, consent_source, consent_note,
+                phone, display_name, opted_in, consent_source, consent_note,
                 consent_at, opted_out_at, created_at, updated_at
-            ) VALUES (?, 1, ?, ?, ?, NULL, ?, ?)
+            ) VALUES (?, ?, 1, ?, ?, ?, NULL, ?, ?)
             ON CONFLICT(phone) DO UPDATE SET
+                display_name = CASE
+                    WHEN excluded.display_name <> '' THEN excluded.display_name
+                    ELSE contacts.display_name
+                END,
                 opted_in = 1,
                 consent_source = excluded.consent_source,
                 consent_note = excluded.consent_note,
@@ -69,8 +88,19 @@ def set_opt_in(
                 opted_out_at = NULL,
                 updated_at = excluded.updated_at
             """,
-            (phone, source, note, consent_time, now, now),
+            (phone, name, source, note, consent_time, now, now),
         )
+
+
+def update_display_name(phone: str, display_name: str) -> None:
+    now = int(time.time())
+    with connect() as connection:
+        cursor = connection.execute(
+            "UPDATE contacts SET display_name = ?, updated_at = ? WHERE phone = ?",
+            (str(display_name).strip(), now, phone),
+        )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Contact {phone} was not found")
 
 
 def set_opt_out(phone: str) -> None:
@@ -79,8 +109,8 @@ def set_opt_out(phone: str) -> None:
         connection.execute(
             """
             INSERT INTO contacts (
-                phone, opted_in, opted_out_at, created_at, updated_at
-            ) VALUES (?, 0, ?, ?, ?)
+                phone, display_name, opted_in, opted_out_at, created_at, updated_at
+            ) VALUES (?, '', 0, ?, ?, ?)
             ON CONFLICT(phone) DO UPDATE SET
                 opted_in = 0,
                 opted_out_at = excluded.opted_out_at,
@@ -103,7 +133,7 @@ def get_contact(phone: str) -> dict[str, Any] | None:
     with connect() as connection:
         row = connection.execute(
             """
-            SELECT phone, opted_in, consent_source, consent_note,
+            SELECT phone, display_name, opted_in, consent_source, consent_note,
                    consent_at, opted_out_at, created_at, updated_at
             FROM contacts WHERE phone = ?
             """,
@@ -117,7 +147,7 @@ def list_contacts(limit: int = 100) -> list[dict[str, Any]]:
     with connect() as connection:
         rows = connection.execute(
             """
-            SELECT phone, opted_in, consent_source, consent_note,
+            SELECT phone, display_name, opted_in, consent_source, consent_note,
                    consent_at, opted_out_at, created_at, updated_at
             FROM contacts
             ORDER BY updated_at DESC

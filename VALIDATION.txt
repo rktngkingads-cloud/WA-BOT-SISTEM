@@ -1,0 +1,14 @@
+WA Contact & Message Monitor v2
+
+Validation performed:
+- Python compile: PASS
+- Pytest: 7 passed
+- FastAPI /health startup: PASS
+- Offline queue processing: PASS
+- Contact name + opt-in storage: PASS
+- One pending message per contact: PASS
+- Queue countdown data: PASS
+- Queue cancellation: PASS
+- Offline outgoing message log: PASS
+
+Real WhatsApp/Meta delivery was not tested because credentials are intentionally not included.

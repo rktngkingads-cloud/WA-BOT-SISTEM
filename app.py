@@ -6,16 +6,24 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
+from contact_store import increment_reply_counter, init_contact_store, replies_today
 from cooldown import ReplyCooldown
+from queue_store import init_queue_store, list_queue, queue_summary
+from queue_worker import OutboundQueueWorker
 from status_parser import extract_delivery_statuses
 from storage import init_database, list_messages, message_exists, save_message, status_summary
 from wa_client import allowed_recipients, normalize_phone, required_env, send_allowed_reply
+
+load_dotenv(Path(__file__).resolve().with_name(".env"))
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("wa-system")
@@ -31,22 +39,43 @@ def env_float(name: str, default: float) -> float:
         raise RuntimeError(f"{name} must be a number") from exc
 
 
+def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+
+
+def current_day_key() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
 cooldown = ReplyCooldown(
     minimum_seconds=env_float("WA_COOLDOWN_MIN_SECONDS", 16.0),
     maximum_seconds=env_float("WA_COOLDOWN_MAX_SECONDS", 20.0),
 )
+queue_worker = OutboundQueueWorker()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_database()
-    yield
-    await cooldown.shutdown()
+    init_contact_store()
+    init_queue_store()
+    await queue_worker.start()
+    try:
+        yield
+    finally:
+        await queue_worker.shutdown()
+        await cooldown.shutdown()
 
 
 app = FastAPI(
-    title="WA Auto Reply Service",
-    version="1.0.0",
+    title="WA Opt-in Message Monitor",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -98,7 +127,21 @@ def extract_incoming_texts(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _response_data() -> dict[str, Any]:
+    configured = os.getenv("WA_RESPONSE_DATA_PATH", "response_data.json").strip()
+    path = Path(configured)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def reply_text(incoming_text: str) -> str:
+    normalized = incoming_text.casefold()
+
     rules_raw = os.getenv("WA_AUTO_REPLY_RULES", "").strip()
     if rules_raw:
         try:
@@ -107,14 +150,25 @@ def reply_text(incoming_text: str) -> str:
             logger.exception("WA_AUTO_REPLY_RULES is invalid JSON")
         else:
             if isinstance(rules, dict):
-                normalized = incoming_text.casefold()
                 for keyword, response in rules.items():
                     if str(keyword).casefold() in normalized and str(response).strip():
                         return str(response).strip()
 
-    return os.getenv(
-        "WA_AUTO_REPLY_TEXT",
-        "Balasan otomatis: Terima kasih, pesan Anda sudah diterima.",
+    response_data = _response_data()
+    for rule in response_data.get("rules", []) if isinstance(response_data.get("rules"), list) else []:
+        if not isinstance(rule, dict):
+            continue
+        keywords = rule.get("keywords", [])
+        response = str(rule.get("response") or "").strip()
+        if response and any(str(keyword).casefold() in normalized for keyword in keywords):
+            return response
+
+    configured_default = os.getenv("WA_AUTO_REPLY_TEXT", "").strip()
+    if configured_default:
+        return configured_default
+    return str(
+        response_data.get("default")
+        or "Balasan otomatis: Terima kasih, pesan Anda sudah diterima."
     ).strip()
 
 
@@ -137,6 +191,7 @@ async def send_and_record(recipient: str, message: str) -> None:
             status="accepted",
             raw=result,
         )
+        increment_reply_counter(recipient, current_day_key())
 
 
 def require_admin(value: str | None) -> None:
@@ -157,6 +212,8 @@ async def health() -> dict[str, Any]:
         },
         "allowed_recipient_count": len(allowed_recipients()),
         "message_summary": status_summary(),
+        "queue_summary": queue_summary(),
+        "queue_worker": queue_worker.state(),
     }
 
 
@@ -178,10 +235,15 @@ async def webhook(request: Request) -> dict[str, int | str]:
     if not is_valid_signature(raw_body, request.headers.get("X-Hub-Signature-256")):
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
-    payload = json.loads(raw_body)
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
     incoming_count = 0
     scheduled_count = 0
     status_count = 0
+    max_replies_per_day = env_int("WA_MAX_REPLIES_PER_CONTACT_PER_DAY", 6)
 
     for status in extract_delivery_statuses(payload):
         save_message(
@@ -214,11 +276,21 @@ async def webhook(request: Request) -> dict[str, int | str]:
         )
 
         if incoming["sender"] not in permitted:
-            logger.info("Incoming number is not in WA_ALLOWED_RECIPIENTS")
+            logger.info("Incoming number is not opted in or allowlisted")
             continue
 
         response = reply_text(incoming["body"])
         if not response:
+            continue
+
+        if (
+            max_replies_per_day >= 0
+            and replies_today(incoming["sender"], current_day_key()) >= max_replies_per_day
+        ):
+            logger.info(
+                "Daily automatic reply cap reached for recipient ending %s",
+                incoming["sender"][-4:],
+            )
             continue
 
         cooldown.schedule(incoming["sender"], response, send_and_record)
@@ -242,4 +314,17 @@ async def messages(
         "items": list_messages(limit),
         "summary": status_summary(),
         "note": "Delivery status is available; arbitrary user online/active presence is not.",
+    }
+
+
+@app.get("/queue")
+async def queue_items(
+    limit: int = Query(default=100, ge=1, le=500),
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+) -> dict[str, Any]:
+    require_admin(x_admin_key)
+    return {
+        "items": list_queue(limit),
+        "summary": queue_summary(),
+        "worker": queue_worker.state(),
     }
