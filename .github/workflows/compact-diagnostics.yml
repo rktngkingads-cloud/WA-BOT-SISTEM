@@ -10,8 +10,11 @@ jobs:
   compact-test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - name: Install
-        run: python3 -m pip install -q -r requirements.txt
       - name: First failure
-        run: python3 -m pytest -q -x --tb=line
+        env:
+          SOURCE_BRANCH: ${{ github.head_ref }}
+        run: |
+          git clone -q --depth 1 --branch "$SOURCE_BRANCH" https://github.com/rktngkingads-cloud/WA-BOT-SISTEM.git source
+          cd source
+          python3 -m pip install -q -r requirements.txt
+          python3 -m pytest -q -x --tb=line
