@@ -20,8 +20,21 @@ from cooldown import ReplyCooldown
 from queue_store import init_queue_store, list_queue, queue_summary
 from queue_worker import OutboundQueueWorker
 from status_parser import extract_delivery_statuses
-from storage import init_database, list_messages, message_exists, save_message, status_summary
-from wa_client import allowed_recipients, normalize_phone, required_env, send_allowed_reply
+from storage import (
+    database_health,
+    init_database,
+    list_messages,
+    message_exists,
+    save_message,
+    status_summary,
+)
+from wa_client import (
+    allowed_recipients,
+    mode as runtime_mode,
+    normalize_phone,
+    required_env,
+    send_allowed_reply,
+)
 
 load_dotenv(Path(__file__).resolve().with_name(".env"))
 
@@ -53,6 +66,10 @@ def current_day_key() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 cooldown = ReplyCooldown(
     minimum_seconds=env_float("WA_COOLDOWN_MIN_SECONDS", 16.0),
     maximum_seconds=env_float("WA_COOLDOWN_MAX_SECONDS", 20.0),
@@ -75,7 +92,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="WA Opt-in Message Monitor",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -83,8 +100,11 @@ app = FastAPI(
 def is_valid_signature(raw_body: bytes, signature_header: str | None) -> bool:
     app_secret = os.getenv("WA_APP_SECRET", "").strip()
     if not app_secret:
-        logger.warning("WA_APP_SECRET is empty; webhook signature validation is disabled")
-        return True
+        if runtime_mode() == "offline":
+            logger.debug("Webhook signature validation skipped in OFFLINE mode")
+            return True
+        logger.error("WA_APP_SECRET is required for webhook validation in META mode")
+        return False
     if not signature_header or not signature_header.startswith("sha256="):
         return False
 
@@ -102,23 +122,36 @@ def parse_timestamp(value: Any) -> int | None:
 
 def extract_incoming_texts(payload: dict[str, Any]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    for entry in payload.get("entry", []):
-        for change in entry.get("changes", []):
-            value = change.get("value", {})
-            for message in value.get("messages", []) or []:
-                if message.get("type") != "text":
+    for entry in _as_list(payload.get("entry")):
+        if not isinstance(entry, dict):
+            continue
+        for change in _as_list(entry.get("changes")):
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            for message in _as_list(value.get("messages")):
+                if not isinstance(message, dict) or message.get("type") != "text":
                     continue
 
                 message_id = message.get("id")
                 sender = message.get("from")
-                body = (message.get("text") or {}).get("body")
+                text = message.get("text")
+                body = text.get("body") if isinstance(text, dict) else None
                 if not message_id or not sender or not body:
+                    continue
+
+                try:
+                    normalized_sender = normalize_phone(str(sender))
+                except ValueError:
+                    logger.warning("Ignoring incoming message with an invalid sender number")
                     continue
 
                 result.append(
                     {
                         "message_id": str(message_id),
-                        "sender": normalize_phone(str(sender)),
+                        "sender": normalized_sender,
                         "body": str(body).strip(),
                         "timestamp": parse_timestamp(message.get("timestamp")),
                         "raw": message,
@@ -155,12 +188,15 @@ def reply_text(incoming_text: str) -> str:
                         return str(response).strip()
 
     response_data = _response_data()
-    for rule in response_data.get("rules", []) if isinstance(response_data.get("rules"), list) else []:
+    response_rules = response_data.get("rules", [])
+    for rule in response_rules if isinstance(response_rules, list) else []:
         if not isinstance(rule, dict):
             continue
         keywords = rule.get("keywords", [])
         response = str(rule.get("response") or "").strip()
-        if response and any(str(keyword).casefold() in normalized for keyword in keywords):
+        if response and isinstance(keywords, list) and any(
+            str(keyword).casefold() in normalized for keyword in keywords
+        ):
             return response
 
     configured_default = os.getenv("WA_AUTO_REPLY_TEXT", "").strip()
@@ -175,11 +211,19 @@ def reply_text(incoming_text: str) -> str:
 async def send_and_record(recipient: str, message: str) -> None:
     try:
         result = await send_allowed_reply(recipient, message)
-    except (httpx.HTTPError, RuntimeError, ValueError, PermissionError):
-        logger.exception("Automatic reply failed for recipient ending %s", recipient[-4:])
+    except (httpx.HTTPError, RuntimeError, ValueError, PermissionError) as exc:
+        logger.exception(
+            "Automatic reply failed for recipient ending %s: %s",
+            recipient[-4:],
+            exc,
+        )
         return
 
+    outgoing_status = "simulated" if result.get("mode") == "offline" else "accepted"
+    recorded = False
     for item in result.get("messages", []) or []:
+        if not isinstance(item, dict):
+            continue
         message_id = item.get("id")
         if not message_id:
             continue
@@ -188,9 +232,12 @@ async def send_and_record(recipient: str, message: str) -> None:
             direction="outgoing",
             phone=recipient,
             body=message,
-            status="accepted",
+            status=outgoing_status,
             raw=result,
         )
+        recorded = True
+
+    if recorded:
         increment_reply_counter(recipient, current_day_key())
 
 
@@ -204,8 +251,11 @@ def require_admin(value: str | None) -> None:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+    database = database_health()
     return {
-        "status": "ok",
+        "status": "ok" if database.get("ok") else "degraded",
+        "mode": runtime_mode(),
+        "database": database,
         "cooldown_seconds": {
             "minimum": cooldown.minimum_seconds,
             "maximum": cooldown.maximum_seconds,
@@ -223,7 +273,9 @@ async def verify_webhook(
     token: str | None = Query(default=None, alias="hub.verify_token"),
     challenge: str | None = Query(default=None, alias="hub.challenge"),
 ) -> str:
-    expected = required_env("WA_VERIFY_TOKEN")
+    expected = os.getenv("WA_VERIFY_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="WA_VERIFY_TOKEN is not configured")
     if mode == "subscribe" and token and hmac.compare_digest(token, expected):
         return challenge or ""
     raise HTTPException(status_code=403, detail="Webhook verification failed")
@@ -239,6 +291,8 @@ async def webhook(request: Request) -> dict[str, int | str]:
         payload = json.loads(raw_body)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Webhook payload must be a JSON object")
 
     incoming_count = 0
     scheduled_count = 0
