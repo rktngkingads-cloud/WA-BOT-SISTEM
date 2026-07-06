@@ -1,6 +1,6 @@
 # WA Contact & Message Monitor — Windows CMD
 
-Sistem ini menyediakan kolom kontak, input nomor tujuan, antrean satu pesan per kontak, countdown pengiriman, dan log aktivitas pesan. Tidak ada perintah broadcast atau import massal.
+Sistem menyediakan kolom kontak, input nomor tujuan, antrean chat individual, countdown pengiriman, dan log aktivitas pesan. Daftar kontak dapat dimasukkan sekaligus melalui CSV, tetapi setiap nomor tetap diproses sebagai chat satu-per-satu dengan jeda.
 
 ## Menjalankan
 
@@ -20,7 +20,9 @@ run_wa_bot.bat
 
 Mode bawaan adalah `WA_MODE=offline`. Pesan hanya disimulasikan dan tidak dikirim ke WhatsApp nyata.
 
-## Tombol monitor
+## Input satu kontak
+
+Tombol monitor:
 
 - `A` — tambah kontak dan nomor opt-in
 - `E` — ubah nama pada kolom Contact
@@ -30,9 +32,36 @@ Mode bawaan adalah `WA_MODE=offline`. Pesan hanya disimulasikan dan tidak dikiri
 - `R` — refresh
 - `Q` — keluar
 
+## Input daftar kontak sekaligus
+
+Jalankan:
+
+```bat
+run_contact_queue.bat
+```
+
+Pada pemakaian pertama, script membuat `batch_contacts.csv` dari contoh. Isi datanya menggunakan format:
+
+```csv
+contact_name,phone,message,consent,consent_source,consent_note
+Customer A,60123456789,,yes,crm-opt-in,Persetujuan tercatat
+Customer B,60198765432,,yes,form-opt-in,Persetujuan tercatat
+```
+
+Cara kerja:
+
+1. Isi semua nama dan nomor tujuan di `batch_contacts.csv`.
+2. Jalankan `run_contact_queue.bat`.
+3. Masukkan satu pesan umum melalui CMD. Kolom `message` pada CSV dapat dipakai untuk pesan khusus per kontak.
+4. Sistem menampilkan preview, jumlah kontak valid, baris yang ditolak, waktu tunggu, dan estimasi durasi.
+5. Ketik `QUEUE` untuk memasukkan semua chat individual ke antrean.
+6. Jalankan atau buka `run_wa_bot.bat` untuk melihat countdown setiap nomor.
+
+Setiap nomor memiliki item queue sendiri. Sistem tidak membuat grup dan tidak mengirim semua nomor pada detik yang sama.
+
 ## Kolom monitor
 
-- **Contact** — nama tujuan yang diisi saat menambah kontak
+- **Contact** — nama tujuan
 - **Phone** — nomor internasional, contoh `60123456789`
 - **State** — `READY`, `LIMIT`, `OPT-OUT`, atau `ALLOWLIST`
 - **Today** — total pesan hari ini dibanding batas harian
@@ -41,16 +70,18 @@ Mode bawaan adalah `WA_MODE=offline`. Pesan hanya disimulasikan dan tidak dikiri
 
 Panel kanan menampilkan perubahan queue dan aktivitas pesan masuk/keluar.
 
-## Proteksi anti-spam
+## Pembatasan anti-spam
 
-- Kontak antrean wajib tercatat `opted_in=1` di database.
+- Kontak wajib sudah opt-in atau memiliki `consent=yes` dan `consent_source` pada CSV.
 - Hanya satu pesan yang boleh menunggu untuk setiap kontak.
-- Tidak tersedia perintah broadcast atau queue semua kontak.
-- Delay minimum bawaan 15 detik.
-- Jarak global antar-pengiriman bawaan 15 detik.
+- Nomor duplikat dalam satu file ditolak.
+- Daftar dibatasi maksimal 50 kontak secara bawaan.
+- Delay awal bawaan 30 detik.
+- Jarak antar-kontak bawaan 20 detik.
+- Delay minimum sistem 15 detik.
 - Batas bawaan 6 pesan per kontak per hari.
 - Opt-out otomatis membatalkan pesan yang masih menunggu.
-- Pengiriman queue nyata pada mode Meta tetap mati sampai `WA_QUEUE_REAL_SEND_ENABLED=true` diaktifkan secara eksplisit.
+- Pengiriman nyata pada mode Meta tetap mati sampai `WA_QUEUE_REAL_SEND_ENABLED=true` diaktifkan secara eksplisit.
 
 Pengaturan dapat diubah di `.env`:
 
@@ -58,7 +89,16 @@ Pengaturan dapat diubah di `.env`:
 WA_QUEUE_DEFAULT_DELAY_SECONDS=30
 WA_QUEUE_MIN_DELAY_SECONDS=15
 WA_QUEUE_GLOBAL_GAP_SECONDS=15
+WA_BATCH_MAX_CONTACTS=50
+WA_BATCH_INITIAL_DELAY_SECONDS=30
+WA_BATCH_GAP_SECONDS=20
 WA_MAX_REPLIES_PER_CONTACT_PER_DAY=6
+```
+
+Validasi tanpa memasukkan antrean:
+
+```bat
+.venv\Scripts\python.exe batch_queue.py --file batch_contacts.csv --dry-run
 ```
 
 ## Mode Meta resmi
@@ -69,7 +109,7 @@ Untuk pengiriman nyata, ubah:
 WA_MODE=meta
 ```
 
-Kemudian lengkapi kredensial Meta resmi. Antrean pengiriman nyata masih tetap berhenti sampai:
+Kemudian lengkapi kredensial Meta resmi. Antrean pengiriman nyata tetap berhenti sampai:
 
 ```env
 WA_QUEUE_REAL_SEND_ENABLED=true
