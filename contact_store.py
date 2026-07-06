@@ -1,32 +1,19 @@
 from __future__ import annotations
 
-import os
-import sqlite3
 import time
-from pathlib import Path
 from typing import Any
 
-
-def database_path() -> Path:
-    path = Path(os.getenv("WA_DB_PATH", "data/wa-system.db"))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+from db_utils import connect, initialize_pragmas
 
 
-def connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(database_path(), timeout=5.0)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA busy_timeout = 5000")
-    return connection
-
-
-def _column_names(connection: sqlite3.Connection, table: str) -> set[str]:
+def _column_names(connection, table: str) -> set[str]:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
     return {str(row["name"]) for row in rows}
 
 
 def init_contact_store() -> None:
     with connect() as connection:
+        initialize_pragmas(connection)
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS contacts (
@@ -51,7 +38,6 @@ def init_contact_store() -> None:
             """
         )
 
-        # Safe migration for databases created by the previous release.
         if "display_name" not in _column_names(connection, "contacts"):
             connection.execute(
                 "ALTER TABLE contacts ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"
@@ -143,7 +129,7 @@ def get_contact(phone: str) -> dict[str, Any] | None:
 
 
 def list_contacts(limit: int = 100) -> list[dict[str, Any]]:
-    limit = max(1, min(limit, 500))
+    limit = max(1, min(int(limit), 500))
     with connect() as connection:
         rows = connection.execute(
             """

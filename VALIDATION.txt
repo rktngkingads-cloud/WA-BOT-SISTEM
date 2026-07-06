@@ -1,14 +1,14 @@
-WA Contact & Message Monitor v2
+WA Contact & Message Monitor v2.0.1 reliability patch
 
 Validation performed:
 - Python compile: PASS
-- Pytest: 7 passed
-- FastAPI /health startup: PASS
-- Offline queue processing: PASS
-- Contact name + opt-in storage: PASS
-- One pending message per contact: PASS
-- Queue countdown data: PASS
-- Queue cancellation: PASS
-- Offline outgoing message log: PASS
+- Pytest: 9 passed
+- FastAPI lifespan and /health: PASS
+- SQLite journal mode WAL: PASS
+- Contact opt-in/out storage: PASS
+- Queue storage regression tests: PASS
+- Out-of-order delivery status regression prevention: PASS
+- Message body/phone backfill after early status callback: PASS
+- Malformed delivery status nodes ignored safely: PASS
 
 Real WhatsApp/Meta delivery was not tested because credentials are intentionally not included.

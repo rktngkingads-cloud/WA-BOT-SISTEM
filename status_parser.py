@@ -10,22 +10,32 @@ def parse_timestamp(value: Any) -> int | None:
         return None
 
 
-def extract_delivery_statuses(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract official delivery states from a WhatsApp webhook payload."""
-    statuses: list[dict[str, Any]] = []
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
-    for entry in payload.get("entry", []):
-        for change in entry.get("changes", []):
-            value = change.get("value", {})
-            for item in value.get("statuses", []) or []:
+
+def extract_delivery_statuses(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+    for entry in _as_list(payload.get("entry")):
+        if not isinstance(entry, dict):
+            continue
+        for change in _as_list(entry.get("changes")):
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            for item in _as_list(value.get("statuses")):
+                if not isinstance(item, dict):
+                    continue
                 message_id = item.get("id")
                 state = item.get("status")
                 if not message_id or not state:
                     continue
 
-                errors = item.get("errors") or []
+                errors = _as_list(item.get("errors"))
                 error: str | None = None
-                if errors:
+                if errors and isinstance(errors[0], dict):
                     first = errors[0]
                     error = str(
                         first.get("message")
@@ -37,7 +47,7 @@ def extract_delivery_statuses(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 statuses.append(
                     {
                         "message_id": str(message_id),
-                        "status": str(state),
+                        "status": str(state).strip().casefold(),
                         "recipient_id": str(item.get("recipient_id") or "unknown"),
                         "timestamp": parse_timestamp(item.get("timestamp")),
                         "error": error,

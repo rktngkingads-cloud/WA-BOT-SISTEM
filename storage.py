@@ -1,28 +1,17 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import time
-from pathlib import Path
 from typing import Any
 
-
-def database_path() -> Path:
-    path = Path(os.getenv("WA_DB_PATH", "data/wa-system.db"))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(database_path(), timeout=5.0)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA busy_timeout = 5000")
-    return connection
+from db_utils import connect, database_path, initialize_pragmas
+from status_utils import choose_status
 
 
 def init_database() -> None:
     with connect() as connection:
+        initialize_pragmas(connection)
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS messages (
@@ -56,6 +45,19 @@ def message_exists(message_id: str) -> bool:
     return row is not None
 
 
+def get_message(message_id: str) -> dict[str, Any] | None:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT message_id, direction, phone, body, status,
+                   event_timestamp, error, raw_json, created_at, updated_at
+            FROM messages WHERE message_id = ?
+            """,
+            (message_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def save_message(
     *,
     message_id: str,
@@ -66,40 +68,90 @@ def save_message(
     event_timestamp: int | None = None,
     error: str | None = None,
     raw: dict[str, Any] | None = None,
-) -> None:
+) -> str:
+    if direction not in {"incoming", "outgoing"}:
+        raise ValueError("direction must be incoming or outgoing")
+
     now = int(time.time())
     raw_json = json.dumps(raw, ensure_ascii=False, separators=(",", ":")) if raw else None
+    clean_body = str(body or "")
+    clean_phone = str(phone or "unknown")
+    clean_status = str(status or "unknown").strip().casefold() or "unknown"
+
     with connect() as connection:
-        connection.execute(
-            """
-            INSERT INTO messages (
-                message_id, direction, phone, body, status,
-                event_timestamp, error, raw_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(message_id) DO UPDATE SET
-                status = excluded.status,
-                event_timestamp = COALESCE(excluded.event_timestamp, messages.event_timestamp),
-                error = excluded.error,
-                raw_json = COALESCE(excluded.raw_json, messages.raw_json),
-                updated_at = excluded.updated_at
-            """,
-            (
-                message_id,
-                direction,
-                phone,
-                body,
-                status,
-                event_timestamp,
-                error,
-                raw_json,
-                now,
-                now,
-            ),
-        )
+        connection.execute("BEGIN IMMEDIATE")
+        existing = connection.execute(
+            "SELECT direction, phone, body, status, event_timestamp, error, raw_json, created_at "
+            "FROM messages WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+
+        if existing is None:
+            effective_status = clean_status
+            connection.execute(
+                """
+                INSERT INTO messages (
+                    message_id, direction, phone, body, status,
+                    event_timestamp, error, raw_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    direction,
+                    clean_phone,
+                    clean_body,
+                    effective_status,
+                    event_timestamp,
+                    error,
+                    raw_json,
+                    now,
+                    now,
+                ),
+            )
+        else:
+            effective_status = choose_status(existing["status"], clean_status)
+            effective_direction = (
+                direction
+                if existing["body"] == "" and clean_body and direction == "outgoing"
+                else str(existing["direction"])
+            )
+            effective_phone = (
+                clean_phone
+                if str(existing["phone"] or "") in {"", "unknown"} and clean_phone != "unknown"
+                else str(existing["phone"])
+            )
+            effective_body = clean_body if clean_body else str(existing["body"] or "")
+            effective_event_timestamp = (
+                event_timestamp if event_timestamp is not None else existing["event_timestamp"]
+            )
+            effective_error = error if effective_status == clean_status else existing["error"]
+            effective_raw = raw_json or existing["raw_json"]
+
+            connection.execute(
+                """
+                UPDATE messages
+                SET direction = ?, phone = ?, body = ?, status = ?,
+                    event_timestamp = ?, error = ?, raw_json = ?, updated_at = ?
+                WHERE message_id = ?
+                """,
+                (
+                    effective_direction,
+                    effective_phone,
+                    effective_body,
+                    effective_status,
+                    effective_event_timestamp,
+                    effective_error,
+                    effective_raw,
+                    now,
+                    message_id,
+                ),
+            )
+        connection.commit()
+    return effective_status
 
 
 def list_messages(limit: int = 100) -> list[dict[str, Any]]:
-    limit = max(1, min(limit, 500))
+    limit = max(1, min(int(limit), 500))
     with connect() as connection:
         rows = connection.execute(
             """
@@ -120,3 +172,18 @@ def status_summary() -> dict[str, int]:
             "SELECT status, COUNT(*) AS total FROM messages GROUP BY status"
         ).fetchall()
     return {str(row["status"]): int(row["total"]) for row in rows}
+
+
+def database_health() -> dict[str, Any]:
+    try:
+        with connect() as connection:
+            integrity = connection.execute("PRAGMA quick_check").fetchone()
+            journal = connection.execute("PRAGMA journal_mode").fetchone()
+        return {
+            "ok": bool(integrity and str(integrity[0]).casefold() == "ok"),
+            "integrity": str(integrity[0]) if integrity else "unknown",
+            "journal_mode": str(journal[0]) if journal else "unknown",
+            "path": str(database_path()),
+        }
+    except sqlite3.Error as exc:
+        return {"ok": False, "error": str(exc), "path": str(database_path())}
